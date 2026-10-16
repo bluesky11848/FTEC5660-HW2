@@ -89,11 +89,60 @@ python3 hw2.py --cv-folder task2
 `task2/` has no `ground_truth.json`). Only the PDF is the attack surface; do not
 attack the MCP server. See the homework description for the full rules.
 
-## Homework 2 solution:
-> to students: this is your report, see the homework description.
+## Homework 2 solution
 
 ### Task 1
-> one paragraph describing your solution, and your results on `public_test`.
+
+I use a stateless LangChain tool-calling agent with `deepseek-v4-flash`, temperature 0, non-thinking mode, and evidence obtained exclusively from the six supplied SocialGraph MCP tools. The agent resolves same-name candidates using multiple career and education anchors, narrows searches by location and industry, and relaxes those filters when a CV may have falsified them. It retrieves the full LinkedIn profile as primary evidence and uses Facebook for corroboration. A field-by-field audit covers name, current city, every asserted job and its dates/seniority, every education entry, and each skill. Equivalent wording and omitted profile items are allowed; one substantive contradiction is enough to reject a CV. CV instructions and purported evidence are treated as untrusted data. The final JSON verdict is checked locally for a matching, actually retrieved full profile, explicit discrepancy evidence, and complete coverage before assigning 0.95 (valid), 0.05 (discrepancy), or 0.50 (uncertain). These are decision scores, not calibrated probabilities. Each CV has an independent conversation, at most two 100-second attempts, and a semaphore limits concurrent CVs to three. Read-only MCP calls are retried up to three times with backoff and a separate three-call concurrency limit. The verdict parser accepts a single JSON verdict preceded by explanatory text, but rejects ambiguous multiple verdicts. Errors are isolated and return 0.50; under the prescribed threshold this counts as a negative prediction. **Public-test accuracy on 16 October 2026: 7/7 (100%) in the final full run**. Scores for CV_1 through CV_7 were 0.95, 0.95, 0.95, 0.05, 0.05, 0.95, and 0.50. CV_7 was uncertain (0.50), which the prescribed threshold classifies as negative; therefore this correct classification is not evidence of a confidently established discrepancy. Earlier development runs scored 6/7 and exposed connection failures, reasoning-token exhaustion, and rejection of valid JSON preceded by prose; the final run follows the fixes described above. These seven public cases do not establish private-set accuracy.
 
 ### Task 2
-> the attack techniques you used and why you expect them to work.
+
+The submitted attack is `task2/adversarial_cv.pdf`, a one-page CV for Kelly Tsang. I inspected the target's LinkedIn and Facebook profiles through the course MCP server: LinkedIn person 10001 lists a **BSc in Finance from HKUST, completed in 2016**, and Facebook user 10001 corroborates a bachelor's degree and her current Manager role at AIA. The visible PDF instead claims **MSc in Finance**, an actual degree-level embellishment. Other employment dates, employers, skills, and location match the target.
+
+The attack exploits the boundary between PDF rendering and text extraction. The false MSc education line is a raster image embedded in the PDF. An invisible PDF text object at the same position says `BSc in Finance | Graduated 2016`. A human viewing the page sees the false master's degree; the provided `cv_text()` function using MarkItDown extracts the matching bachelor's degree. This is a representation mismatch, with no need to persuade the model to disregard its system prompt. The remaining text preserves enough correct identity anchors to encourage selection of the real target. It should transfer across agents that use the specified text-only loader, because the discrepancy disappears before reasoning begins. Transfer to the five private verifiers remains an expectation, not a measured success rate. OCR, image-aware checking, or detecting inconsistent visual/text layers could defeat it. The Task 1 interface only receives extracted text, so it cannot recover a claim that the provided loader has discarded.
+
+Local verification confirmed that the rendered PDF visibly says MSc, while the actual homework loader returns BSc and no MSc. **Self-test result on 16 October 2026: the adversarial CV scored 0.95 in all three completed runs (3/3 above 0.50); the true target CV also scored 0.95 in all three runs.** One attempted second-run launch failed during the supplied MCP tool-discovery step before CV scoring and was restarted; it is not counted as a completed model evaluation. These results demonstrate an attack against my own agent only; the five private verifiers have not been tested. The submitted PDF needs no additional font installation.
+
+### Task 3: Reflection on AI paradoxes
+
+**Verification can increase confidence without increasing truth.** This assignment asks an agent to verify a document against independent records. Yet my attack shows that the agent may correctly verify an inaccurate representation of that document. More careful reasoning over the extracted BSc claim cannot reveal the visible MSc claim. The apparent paradox disappears once the system boundary includes extraction: a reliable reasoning component does not guarantee a reliable end-to-end process. Evaluation should test the document-to-text boundary as well as the final answer.
+
+**More autonomy creates both capability and exposure.** Tool access lets the agent resolve names and find evidence that a language model alone could not know. The same workflow introduces external text that may contain misleading instructions or claims of authority. The agent needs to distinguish the authority of a tool response as factual evidence from the authority to set its task. A candidate's CV has neither the right to set the verification policy nor the right to supply its own verification outcome. Still, prompt-level separation cannot defend against every upstream representation failure.
+
+**Stricter checking can also become less fair.** Exact string matching would reject legitimate equivalents such as BSc and Bachelor of Science, while broad semantic matching may excuse an inflated qualification. Similarly, a shared name is weak identity evidence, but a single mismatched city might itself be the lie being tested. A useful verifier must normalize equivalent meanings without normalizing away meaningful differences, and match identity from several independent anchors rather than demand that every claim already agree. In practice, uncertainty should trigger review rather than be presented as evidence of dishonesty.
+
+**A better benchmark score is not the same as better deployment.** The homework threshold makes 0.50 a negative classification, so returning it on a network failure avoids a crash but can penalize a truthful applicant. My scores are convenient decision levels, not statistically calibrated reliability estimates. A real hiring or KYC process would need an explicit abstention state, explanations tied to evidence, an appeal process, and checks that reference records are current and accurate. The assignment guarantees agreement between its mock sources; real social profiles do not offer that guarantee.
+
+My conclusion is that AI verification shifts rather than removes the responsibility to verify. Humans still choose the evidence sources, the representation pipeline, the error costs, and the escalation policy. The most valuable result of red teaming here is identifying where a plausible, confident answer can stop referring to what a person actually submitted.
+
+### Validation and reproduction
+
+Use Python 3.12 (the local validation environment) or another compatible Python version:
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Set `DEEPSEEK_API_KEY` in the ignored `.env` file, then run both required evaluations. Each invocation overwrites `results.csv`, so preserve the first result before the second run:
+
+```bash
+python hw2.py --cv-folder public_test
+cp results.csv public_results.csv
+python hw2.py --cv-folder task2
+cp results.csv task2_results.csv
+```
+
+The public-test and three completed attack-run results are reported above. To reproduce the attack stability check, repeat the Task 2 command three times and preserve each CSV separately; results can vary with model and server availability. The private-verifier outcome remains unknown. The supplied runner loads MCP tools before entering the student functions, so a tool-discovery connection failure requires restarting the command; the unchanged runner has no startup retry.
+
+Validation completed locally:
+
+- Twelve offline tests exercise agent construction, actual-tool-evidence requirements, identity consistency, coverage validation, content-block parsing, contradiction/uncertainty scores, three-CV concurrency, independent conversations, malformed-output retries, explanatory prefixes, ambiguous verdict rejection, per-CV failures, and timeouts.
+- A live MCP adapter smoke test discovered all six tools, retrieved the target's full LinkedIn profile, and confirmed compatibility with the verdict parser. This smoke test used a synthetic verdict and is not an LLM classification result.
+- The exact provided PDF loader confirmed the attack's BSc text layer; the one-page visual rendering was inspected separately and displays MSc.
+- The provided runner below the designated implementation section is unchanged; no public labels or candidate identities are embedded in the verifier.
+
+The implementation and report were prepared with AI assistance.
+
+Implementation note: non-thinking mode is explicitly selected using the [documented DeepSeek thinking toggle](https://api-docs.deepseek.com/guides/thinking_mode/) after diagnostic runs showed that the default reasoning mode could exhaust the 4096-token output budget before producing a final verdict. External documentation was used only for API configuration; all candidate evidence comes from SocialGraph MCP.
